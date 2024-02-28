@@ -1,0 +1,153 @@
+const fs = require('fs');
+const path = require('path');
+
+// 指定项目根目录地址
+const projectRoot = '/Users/zhengchaoshu/Study/zhonghe/src/test';
+// 指定项目根目录文件夹名
+const searchFolder = 'api';
+// 定义 API 文件夹路径
+const apiFolderPath = path.join(projectRoot, searchFolder);
+// 创建表
+const writeStream = fs.createWriteStream('file.xls');
+// 表头
+const header = '序号\t请求函数名\t请求URL\t请求js文件路径\t.vue\t.vue文件路径\t所在行数\n';
+// 写入表头
+writeStream.write(header);
+// 表格内容
+const xlsContentList = [];
+
+// 解析.js文件中的函数名和URL
+function parseFunctions(content) {
+    // 匹配导出的函数名和URL的正则表达式
+    // const functionExportRegex = /(export\s+(?:const|function)\s+(\w+)\s*=\s*\(?\s*|\w+\)?\s*=>)|(function\s+(\w+)\s*\(.*?\)\s*{)|(url:\s*'(.+?)')/g;
+    const functionExportRegex = /(export\s+(?:const|function)\s+(\w+)\s*=\s*\(?\s*|\w+\)?\s*=>)|(function\s+(\w+)\s*\(.*?\)\s*{)|(url:\s*.*?(?:\(['"](.+?)['"]\)|['"](.+?)['"]))/g
+
+    const functionNamesAndURLs = [];
+    let match;
+    let functionName = '';
+    let url = '';
+    while ((match = functionExportRegex.exec(content)) !== null) {
+        if (match[2] || match[4]) {
+            functionName = (match[2] || match[4]).trim();
+        }
+        if (match[5]) {
+            url = match[5];
+            functionNamesAndURLs.push({ functionName, url });
+            functionName = ''; // Reset functionName
+            url = ''; // Reset url
+        }
+    }
+
+    return functionNamesAndURLs;
+}
+
+// 递归扫描目录下的所有.js文件，获取函数名和对应的URL
+function scanJSFilesForFunctionNames(dir,isApi) {
+    const files = fs.readdirSync(dir);
+    let functionNamesAndFiles = {};
+
+    files.forEach(file => {
+        const filePath = path.join(dir, file);
+        const stats = fs.statSync(filePath);
+
+        if (stats.isDirectory()) {
+            // 如果是文件夹，递归扫描
+            if(filePath.includes(searchFolder)){
+                Object.assign(functionNamesAndFiles, scanJSFilesForFunctionNames(filePath,true));
+            } else {
+                Object.assign(functionNamesAndFiles, scanJSFilesForFunctionNames(filePath));
+            }
+        } else if (stats.isFile() && path.extname(filePath) === '.js' && isApi) {
+            // 如果是 JS 文件，读取文件内容
+            const fileContent = fs.readFileSync(filePath, 'utf-8');
+            // 解析函数名和URL
+            const functionList = parseFunctions(fileContent);
+            // 存储函数名、URL和文件路径
+            functionList.forEach(({ functionName, url }) => {
+                functionNamesAndFiles[functionName] = { url, filePath };
+            });
+        }
+    });
+
+    return functionNamesAndFiles;
+}
+
+// 递归扫描项目根目录下的所有.vue文件，查找函数名的引入路径、行数和函数名函数里的URL
+function scanVueFilesForFunctionImports(functionNamesAndFiles, dir) {
+    const files = fs.readdirSync(dir);
+
+    files.forEach(file => {
+        const filePath = path.join(dir, file);
+        const stats = fs.statSync(filePath);
+
+        if (stats.isDirectory()) {
+            // 如果是文件夹，递归扫描
+            scanVueFilesForFunctionImports(functionNamesAndFiles, filePath);
+        } else if (stats.isFile() && path.extname(filePath) === '.vue') {
+            // 如果是 Vue 文件，读取文件内容
+            const fileContent = fs.readFileSync(filePath, 'utf-8');
+            // 解析.vue文件中的函数引入
+            parseFunctionsFromVue(fileContent, functionNamesAndFiles, filePath);
+        }
+    });
+}
+
+// 解析.vue文件中的函数引入
+function parseFunctionsFromVue(content, functionNamesAndFiles, filePath) {
+    // 匹配 Vue 文件中引入的函数名的正则表达式
+    const functionImportRegex = /import\s+{([^}]+)}\s+from\s+['"`]([^'"`]+)['"`]/g;
+
+    let match;
+    let lineNumber = 0;
+    const lines = content.split('\n');
+    while ((match = functionImportRegex.exec(content)) !== null) {
+        const importedFunctions = match[1].trim().split(',').map(f => f.trim());
+        // 在导入的函数名数组中查找函数名，并输出路径、行数和函数名函数里的URL
+        importedFunctions.forEach(functionName => {
+            if (functionNamesAndFiles.hasOwnProperty(functionName)) {
+                const { url, filePath: jsFilePath } = functionNamesAndFiles[functionName];
+                lineNumber = findFunctionInVue(lines, functionName);
+                let xlsContent = {};
+                if (lineNumber !== -1) {
+                    let vueName = filePath.split('/')[filePath.split('/').length - 1];
+                    // 每条数据
+                    // const urlValue = url.split('url:')[1].trim().replace(/'/g,'')
+                    xlsContent = { functionName, url, jsFilePath, vueName, filePath, lineNumber };
+                    xlsContentList.push(xlsContent);
+                    const rowTemp =
+                        xlsContentList.length +
+                        '\t' +
+                        functionName +
+                        '\t' +
+                        url +
+                        '\t' +
+                        jsFilePath +
+                        '\t' +
+                        vueName +
+                        '\t' +
+                        filePath +
+                        '\t' +
+                        lineNumber +
+                        '\n';
+                    // 注入表数据
+                    writeStream.write(rowTemp);
+                }
+            }
+        });
+    }
+}
+
+// 在给定的行数组中查找函数名所在的行数
+function findFunctionInVue(lines, functionName) {
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes(functionName)) {
+            return i + 1; // 行数从1开始计数
+        }
+    }
+    return -1; // 如果没找到，返回-1
+}
+
+// 开始扫描获取函数名和对应的URL
+const functionNamesAndFiles = scanJSFilesForFunctionNames(apiFolderPath);
+// 使用函数名扫描.vue文件，获取引入路径、行数和函数名函数里的URL
+scanVueFilesForFunctionImports(functionNamesAndFiles, projectRoot);
